@@ -51,7 +51,7 @@ const columns: { cls: string; cells: Cell[] }[] = [
   { cls: 'lm-x1 up', cells: [['cream', <QuestionTile key="a" n={5} />], ['coral', stat2], ['dark', <ScoreTile key="c" value={88} />], ['lime', <FeedbackTile key="d" />], ['yellow', <WaveTile key="e" />]] },
   { cls: 'lm-c1', cells: [['coral', <WaveTile key="a" />], ['cream', <QuestionTile key="b" />], ['dark', <ScoreTile key="c" />], ['lime', <RoleTile key="d" />], ['yellow', stat1]] },
   { cls: 'lm-c2 up', cells: [['yellow', <TimerTile key="a" />], ['dark', <SceneTile key="b" />], ['dark', <CodeTile key="c" />], ['cream', <FeedbackTile key="d" />], ['coral', stat2]] },
-  { cls: 'lm-c3', cells: [['lime', stat3], ['cream', <ScoreTile key="b" value={91} />], ['dark', <WaveTile key="c" />], ['yellow', <RoleTile key="d" />], ['coral', <TimerTile key="e" />]] },
+  { cls: 'lm-c3', cells: [['lime', stat3], ['cream', <ScoreTile key="b" value={91} />], ['dark', <WaveTile key="c" />], ['yellow', <QuestionTile key="d" n={4} />], ['coral', <TimerTile key="e" />]] },
 ];
 
 /** Decorative: hidden from assistive tech. Each column renders its 5 cells twice so a -50% translate loops seamlessly. */

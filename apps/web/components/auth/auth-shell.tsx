@@ -17,7 +17,7 @@ export function AuthShell({ title, subtitle, children }: { title: string; subtit
         </div>
       </main>
       <aside aria-hidden className="relative hidden items-center justify-center overflow-hidden border-l border-border lg:flex">
-                <div className="absolute right-4 top-4"><ThemeToggle /></div>
+                <div className="absolute right-4 top-4 z-10"><ThemeToggle /></div>
         <SceneBackdrop variant="hero" className="!absolute !-z-0 opacity-90" />
       </aside>
     </div>

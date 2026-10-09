@@ -1,6 +1,6 @@
 'use client';
 
-import { motion, useMotionValue, useReducedMotion, useSpring, useTransform } from 'motion/react';
+import { MotionConfig, motion, useMotionValue, useReducedMotion, useSpring, useTransform } from 'motion/react';
 import type { ReactNode } from 'react';
 
 const ease = [0.16, 1, 0.3, 1] as const;
@@ -40,4 +40,9 @@ export function TiltCard({ children, className }: { children: ReactNode; classNa
       {children}
     </motion.div>
   );
+}
+
+/** Makes every Framer Motion animation on the landing page honour the visitor's reduced-motion setting. */
+export function MotionRoot({ children }: { children: ReactNode }) {
+  return <MotionConfig reducedMotion="user">{children}</MotionConfig>;
 }
