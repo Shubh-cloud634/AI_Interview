@@ -45,3 +45,59 @@ export const greeting = (d = new Date()) => (d.getHours() < 12 ? 'Good morning' 
 
 /** Projects are stored as experience rows whose title is the resume section heading, such as "Projects". */
 export const isProject = (e: { title: string }) => /^(?:[a-z]+ )?projects?$/i.test(e.title.trim());
+
+const PROGRAMMING = [
+  'python', 'java', 'javascript', 'typescript', 'c++', 'c#', 'c', 'go', 'golang', 'rust', 'kotlin', 'swift', 'php', 'ruby', 'scala', 'r',
+  'sql', 'algorithms', 'data structures', 'leetcode', 'dsa',
+];
+
+export type InterviewSuggestion = { type: 'technical' | 'coding' | 'hr' | 'behavioral'; score: number; reason: string };
+
+/**
+ * Ranks the four interview types for this candidate from what their resume shows and where they are weakest.
+ * Plain rules, so every suggestion can say why. Returns [] without a profile.
+ */
+export function suggestInterviewTypes(profile: Profile | null | undefined, gapNames: string[]): InterviewSuggestion[] {
+  if (!profile) return [];
+  const skills = profile.skills.map((s) => s.name.trim());
+  const lower = skills.map((s) => s.toLowerCase());
+  const code = skills.filter((_, i) => PROGRAMMING.includes(lower[i]!));
+  const roles = profile.experiences.length;
+  const gaps = gapNames.map((g) => g.toLowerCase());
+  const gap = (...words: string[]) => gapNames.find((_, i) => words.some((w) => gaps[i]!.includes(w)));
+  const list = (xs: string[]) => xs.slice(0, 3).join(', ');
+
+  const codeGap = gap('problem', 'code');
+  const designGap = gap('system', 'design');
+  const commGap = gap('communicat');
+
+  const coding: InterviewSuggestion = {
+    type: 'coding',
+    score: (code.length >= 2 ? 3 : code.length === 1 ? 1.5 : 0) + (codeGap ? 2 : 0),
+    reason: code.length
+      ? `You list ${list(code)}. A live coding round shows that off${codeGap ? ` and works on your weaker area, ${codeGap.toLowerCase()}` : ''}.`
+      : `Your weaker area is ${codeGap?.toLowerCase()}. A coding round builds it.`,
+  };
+  const technical: InterviewSuggestion = {
+    type: 'technical',
+    score: (skills.length >= 6 ? 2.5 : skills.length >= 3 ? 1.5 : 0) + (roles >= 1 ? 1 : 0) + (designGap ? 2 : 0),
+    reason: skills.length
+      ? `${skills.length} skills on your resume, including ${list(skills)}. Expect questions on how you actually used them${designGap ? `, plus your weaker area, ${designGap.toLowerCase()}` : ''}.`
+      : 'Questions on the projects and tools you have worked with.',
+  };
+  const behavioral: InterviewSuggestion = {
+    type: 'behavioral',
+    score: (roles >= 2 ? 3 : roles === 1 ? 1.5 : 0) + (commGap ? 2 : 0),
+    reason: roles
+      ? `${roles} ${roles === 1 ? 'role or project' : 'roles and projects'} give you real stories to tell in STAR form${commGap ? `, and ${commGap.toLowerCase()} is a weaker area` : ''}.`
+      : 'Practise telling clear stories about teamwork and setbacks.',
+  };
+  const hr: InterviewSuggestion = {
+    type: 'hr',
+    score: (roles === 0 ? 2 : roles === 1 ? 1.5 : 0.5) + (profile.education.length && roles <= 1 ? 0.5 : 0),
+    reason: roles <= 1
+      ? 'Early in your career, so be ready to explain your motivation, strengths and fit.'
+      : 'Be ready to explain your motivation, strengths and why this role.',
+  };
+  return [coding, technical, behavioral, hr].sort((a, b) => b.score - a.score);
+}

@@ -1,8 +1,8 @@
 'use client';
 
-import { Suspense, useEffect, useState } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { Suspense, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { ArrowRight, Check, Clock, DoorOpen, FileText, Loader2, Sparkles } from 'lucide-react';
 import { PageHeader } from '@/components/page-header';
 import { Async } from '@/components/async';
@@ -10,12 +10,11 @@ import { Card, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { ErrorState, CardSkeleton } from '@/components/ui/states';
-import { Field, inputClass } from '@/components/ui/field';
 import { cn } from '@/lib/cn';
 import { interviewTypes, kindMeta } from '@/lib/kinds';
-import { label } from '@/lib/insights';
+import { label, suggestInterviewTypes } from '@/lib/insights';
 import { pct } from '@/lib/format';
-import { useCreateSession, useDomains, useModeDetail, useModes, useProfile, useRecommendations, useRoles } from '@/lib/api/hooks';
+import { useCreateSession, useDomains, useModeDetail, useModes, useProfile, useRecommendations } from '@/lib/api/hooks';
 
 export default function Page() {
   return <Suspense fallback={<CardSkeleton lines={5} />}><Setup /></Suspense>;
@@ -26,29 +25,27 @@ function Setup() {
   const params = useSearchParams();
   const preset = params.get('mode') ?? undefined;
   const presetType = params.get('type');
-  const [domainId, setDomainId] = useState<string>();
-  const [roleId, setRoleId] = useState<string>('');
   const [modeId, setModeId] = useState<string | undefined>(preset);
+  const [domainPick, setDomainPick] = useState<string>();
+  const [changing, setChanging] = useState(false);
 
   const domains = useDomains();
-  const roles = useRoles(domainId);
-  const modes = useModes(domainId);
-  const detail = useModeDetail(modeId);
   const recs = useRecommendations();
   const profile = useProfile();
+  const detail = useModeDetail(modeId);
   const create = useCreateSession();
 
-  useEffect(() => {
-    if (detail.data) setDomainId(detail.data.domainId);
-  }, [detail.data]);
+  // The domain is not a question: it follows the resume. A preset mode wins, then the domain the resume is
+  // strongest in, then the only or first published domain. "Change" below is the escape hatch.
+  const domainId = domainPick ?? detail.data?.domainId ?? recs.data?.domains[0]?.domainId ?? domains.data?.items[0]?.id;
+  const domainName = domains.data?.items.find((d) => d.id === domainId)?.name;
+  const modes = useModes(domainId);
 
-  // With a single published domain there is nothing to choose, so skip the step.
-  useEffect(() => {
-    if (!domainId && domains.data?.items.length === 1) setDomainId(domains.data.items[0]!.id);
-  }, [domains.data, domainId]);
-
-  const typeSlugs: ReadonlySet<string> = new Set(interviewTypes.map((t) => t.slug));
-  const otherModes = modes.data?.items.filter((x) => !typeSlugs.has(x.slug)) ?? [];
+  const ranked = useMemo(
+    () => suggestInterviewTypes(profile.data, recs.data?.gaps.map((g) => g.name) ?? []),
+    [profile.data, recs.data],
+  );
+  const rankOf = (id: string) => ranked.findIndex((r) => r.type === id);
 
   useEffect(() => {
     const wanted = interviewTypes.find((t) => t.id === presetType)?.slug;
@@ -56,91 +53,84 @@ function Setup() {
     if (hit) setModeId((cur) => cur ?? hit.id);
   }, [presetType, modes.data]);
 
+  const typeSlugs: ReadonlySet<string> = new Set(interviewTypes.map((t) => t.slug));
+  const otherModes = modes.data?.items.filter((x) => !typeSlugs.has(x.slug)) ?? [];
+
   function start() {
     if (!modeId) return;
-    create.mutate({ modeId, targetRoleId: roleId || undefined }, { onSuccess: (s) => router.push(`/session/${s.id}`) });
+    create.mutate({ modeId }, { onSuccess: (s) => router.push(`/session/${s.id}`) });
   }
 
   const totalSec = detail.data?.spec.stages.reduce((n, s) => n + (s.timeLimitSec ?? 0), 0) ?? 0;
 
   return (
     <>
-      <PageHeader eyebrow="Interview setup" title="Set up your interview." subtitle="Pick a career domain, a target role and a format. Sessions run 30 to 40 minutes and you can leave at any point." />
+      <PageHeader eyebrow="Practice" title="What kind of interview do you want?" subtitle="Pick a type. Every question is built from your resume. Sessions run about 35 minutes and you can leave at any point." />
 
       {profile.isSuccess && profile.data === null && (
         <div className="glass mb-6 flex flex-wrap items-center justify-between gap-4 rounded-[var(--radius)] p-5">
           <p className="flex items-center gap-3 text-sm"><span className="grid size-9 place-items-center rounded-full bg-accent-soft"><FileText size={17} className="text-accent" aria-hidden /></span>
-            <span><strong>Upload your resume first.</strong> <span className="text-muted">Without it the questions are generic. With it, every question is built on your own projects and skills.</span></span></p>
-          <Link href="/resume" className="inline-flex h-8 items-center rounded-full bg-fg px-3.5 text-[13px] font-medium text-bg">Upload resume</Link>
+            <span><strong>Upload your resume first.</strong> <span className="text-muted">We suggest the right interview from your skills, and every question is built on your own projects. Without it the questions are generic.</span></span></p>
+          <Link href="/resume" className="inline-flex h-8 items-center rounded-full bg-accent px-3.5 text-[13px] font-medium text-accent-fg">Upload resume</Link>
         </div>
       )}
-
-      <Async query={recs} skeleton={null}>
-        {(r) =>
-          r.nextMode ? (
-            <div className="glass mb-6 flex flex-wrap items-center justify-between gap-4 rounded-[var(--radius)] border-accent/40 p-5">
-              <p className="flex items-center gap-3"><span className="grid size-9 place-items-center rounded-full bg-accent-soft"><Sparkles size={17} className="text-accent" aria-hidden /></span>
-                <span>Recommended for you: <strong>{r.nextMode.name}</strong>{r.gaps[0] && <span className="block text-sm text-muted">Targets your gap in {r.gaps[0].name}</span>}</span></p>
-              <Button size="sm" onClick={() => setModeId(r.nextMode!.modeId)}>Use this</Button>
-            </div>
-          ) : null
-        }
-      </Async>
 
       <div className="grid gap-6 lg:grid-cols-[1fr_360px]">
         <div className="space-y-6">
           <Card>
-            <CardTitle className="mb-5"><span className="mr-2 font-mono text-accent-2">01</span>Domain and role</CardTitle>
-            <Async query={domains}>
-              {(d) => (
-                <div className="space-y-5">
-                  <div role="radiogroup" aria-label="Career domain" className="flex flex-wrap gap-2">
-                    {d.items.map((x) => (
-                      <button key={x.id} type="button" role="radio" aria-checked={domainId === x.id}
-                        onClick={() => { setDomainId(x.id); setRoleId(''); setModeId(undefined); }}
-                        className={cn('rounded-full border px-4 py-2 text-sm transition', domainId === x.id ? 'border-accent bg-accent-soft text-fg' : 'border-border text-muted hover:border-border-strong hover:text-fg')}>
-                        {x.name}
-                      </button>
-                    ))}
-                  </div>
-                  <Field label="Target role (optional)">
-                    <select className={inputClass} value={roleId} disabled={!domainId || roles.isPending} onChange={(e) => setRoleId(e.target.value)}>
-                      <option value="">Any role</option>
-                      {roles.data?.items.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
-                    </select>
-                  </Field>
-                </div>
+            <div className="mb-5 flex flex-wrap items-center justify-between gap-2">
+              <CardTitle>Interview type</CardTitle>
+              {domainName && (
+                <p className="text-xs text-muted">
+                  Tailored to <span className="text-fg">{domainName}</span>
+                  {(domains.data?.items.length ?? 0) > 1 && <> · <button type="button" className="text-accent-2 underline-offset-2 hover:underline" onClick={() => setChanging((v) => !v)}>change</button></>}
+                </p>
               )}
-            </Async>
-          </Card>
-
-          <Card>
-            <CardTitle className="mb-1"><span className="mr-2 font-mono text-accent-2">02</span>What type of interview do you want?</CardTitle>
-            <p className="mb-5 text-sm text-muted">We build the questions around your resume for the type you choose.</p>
-            {!domainId ? <p className="text-sm text-muted">Choose a domain first.</p> : (
+            </div>
+            {changing && (
+              <div role="radiogroup" aria-label="Career domain" className="mb-5 flex flex-wrap gap-2">
+                {domains.data?.items.map((x) => (
+                  <button key={x.id} type="button" role="radio" aria-checked={domainId === x.id}
+                    onClick={() => { setDomainPick(x.id); setModeId(undefined); setChanging(false); }}
+                    className={cn('rounded-full border px-3.5 py-1.5 text-sm transition', domainId === x.id ? 'border-accent bg-accent-soft text-fg' : 'border-border text-muted hover:border-border-strong hover:text-fg')}>
+                    {x.name}
+                  </button>
+                ))}
+              </div>
+            )}
+            {!domainId ? <CardSkeleton lines={4} /> : (
               <Async query={modes}>
                 {(m) => {
                   const bySlug = new Map(m.items.map((x) => [x.slug, x]));
                   return (
                     <div className="space-y-6">
                       <ul className="grid gap-3 sm:grid-cols-2" role="radiogroup" aria-label="Interview type">
-                        {interviewTypes.map((t) => {
-                          const mode = bySlug.get(t.slug);
-                          const selected = !!mode && modeId === mode.id;
-                          const Icon = t.icon;
-                          return (
-                            <li key={t.id}>
-                              <button type="button" role="radio" aria-checked={selected} disabled={!mode} onClick={() => mode && setModeId(mode.id)}
-                                className={cn('group relative h-full w-full rounded-2xl border p-5 text-left transition disabled:cursor-not-allowed disabled:opacity-45',
-                                  selected ? 'border-accent bg-accent-soft shadow-[0_0_40px_-12px_var(--glow-a)]' : 'border-border bg-surface-2 enabled:hover:-translate-y-0.5 enabled:hover:border-border-strong')}>
-                                {selected && <span className="absolute right-4 top-4 grid size-5 place-items-center rounded-full bg-accent text-accent-fg"><Check size={12} aria-hidden /></span>}
-                                <span className="mb-4 grid size-10 place-items-center rounded-xl bg-surface-2 text-accent"><Icon size={19} aria-hidden /></span>
-                                <p className="font-medium">{t.label} interview</p>
-                                <p className="mt-1 text-xs leading-relaxed text-muted">{mode ? t.blurb : 'Not available for this domain yet.'}</p>
-                              </button>
-                            </li>
-                          );
-                        })}
+                        {[...interviewTypes]
+                          .sort((a, b) => (rankOf(a.id) === -1 ? 99 : rankOf(a.id)) - (rankOf(b.id) === -1 ? 99 : rankOf(b.id)))
+                          .map((t) => {
+                            const mode = bySlug.get(t.slug);
+                            const selected = !!mode && modeId === mode.id;
+                            const Icon = t.icon;
+                            const rank = rankOf(t.id);
+                            const tip = rank === 0 ? 'Suggested for you' : rank === 1 ? 'Also a good fit' : null;
+                            return (
+                              <li key={t.id}>
+                                <button type="button" role="radio" aria-checked={selected} disabled={!mode} onClick={() => mode && setModeId(mode.id)}
+                                  className={cn('group relative h-full w-full rounded-2xl border p-5 text-left transition disabled:cursor-not-allowed disabled:opacity-45',
+                                    selected ? 'border-accent bg-accent-soft shadow-[0_0_40px_-12px_var(--glow-a)]' : 'border-border bg-surface-2 enabled:hover:-translate-y-0.5 enabled:hover:border-border-strong',
+                                    rank === 0 && !selected && mode && 'border-accent/50')}>
+                                  {selected && <span className="absolute right-4 top-4 grid size-5 place-items-center rounded-full bg-accent text-accent-fg"><Check size={12} aria-hidden /></span>}
+                                  <span className="mb-4 flex items-center gap-2">
+                                    <span className="grid size-10 place-items-center rounded-xl bg-surface-2 text-accent"><Icon size={19} aria-hidden /></span>
+                                    {tip && mode && <Badge tone={rank === 0 ? 'accent' : 'neutral'}>{rank === 0 && <Sparkles size={11} aria-hidden />} {tip}</Badge>}
+                                  </span>
+                                  <p className="font-medium">{t.label} interview</p>
+                                  <p className="mt-1 text-xs leading-relaxed text-muted">{mode ? t.blurb : 'Not available for this domain yet.'}</p>
+                                  {tip && mode && <p className="mt-3 border-t border-border pt-3 text-xs leading-relaxed text-fg/80">{ranked[rank]!.reason}</p>}
+                                </button>
+                              </li>
+                            );
+                          })}
                       </ul>
                       {otherModes.length > 0 && (
                         <div>
@@ -162,7 +152,6 @@ function Setup() {
                           </ul>
                         </div>
                       )}
-                      {m.items.length === 0 && <p className="text-sm text-muted">No formats are published for this domain yet.</p>}
                     </div>
                   );
                 }}
@@ -173,7 +162,7 @@ function Setup() {
 
         <Card className="h-fit lg:sticky lg:top-8">
           <CardTitle className="mb-5">What to expect</CardTitle>
-          {!modeId ? <p className="text-sm text-muted">Pick a format to preview its stages.</p> : (
+          {!modeId ? <p className="text-sm text-muted">Pick an interview type to preview its stages.</p> : (
             <Async query={detail}>
               {(d) => (
                 <>
