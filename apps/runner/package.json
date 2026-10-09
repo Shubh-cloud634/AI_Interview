@@ -1,0 +1,24 @@
+{
+  "name": "@ai-interview/runner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Isolated code runner. Pulls jobs from the scheduler outbound-only; holds only its runner credential and signing key.",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "keygen": "tsx src/keygen.ts",
+    "build-images": "docker build -t ai-interview/runner-python:3.12.7 images/python && docker build -t ai-interview/runner-node:22.11.0 images/node",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@ai-interview/shared": "*",
+    "tsx": "^4.20.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  }
+}

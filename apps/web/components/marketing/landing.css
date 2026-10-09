@@ -1,0 +1,60 @@
+/* Landing hero mosaic. Namespaced `lm-` so it cannot collide with app styles.
+   Geometry follows the reference: tile = 1.3125 x column width, pitch = tile + gap, 5 tiles per 14.6s. */
+.lm {
+  --gap: 13px;
+  --col: clamp(148px, 14.6vw, 205.33px);
+  --th: calc(var(--col) * 1.3125);
+  --pitch: calc(var(--th) + var(--gap));
+  --r: 22px;
+  --t-coral: #ff6a45;
+  --t-lime: #c9f26b;
+  --t-yellow: #ffd35a;
+  --t-cream: #f9f6f1;
+  --t-dark: #17130f;
+  --t-ink: #14110d;
+  --lm-grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+@keyframes lm-down { from { transform: translate3d(0, 0, 0); } to { transform: translate3d(0, -50%, 0); } }
+@keyframes lm-up { from { transform: translate3d(0, -50%, 0); } to { transform: translate3d(0, 0, 0); } }
+
+.lm-grid { position: absolute; top: 0; bottom: 0; right: clamp(16px, 4.8vw, 62px); width: calc(3 * var(--col) + 2 * var(--gap)); }
+
+.lm-col { position: absolute; width: var(--col); display: flex; flex-direction: column; animation: lm-down 14.6s linear infinite; will-change: transform; }
+.lm-col.up { animation-name: lm-up; }
+.lm-c1 { left: 0; top: calc(var(--pitch) * 0.305); }
+.lm-c2 { left: calc(var(--col) + var(--gap)); top: calc(var(--pitch) * -0.041); }
+.lm-c3 { left: calc(2 * (var(--col) + var(--gap))); top: calc(var(--pitch) * 0.306); }
+/* Wide screens get extra columns to the left of the main three. */
+.lm-x1, .lm-x2 { display: none; }
+.lm-x1 { left: calc(-1 * (var(--col) + var(--gap))); top: calc(var(--pitch) * 0.12); }
+.lm-x2 { left: calc(-2 * (var(--col) + var(--gap))); top: calc(var(--pitch) * 0.4); }
+@media (min-width: 1560px) { .lm-x1 { display: flex; } }
+@media (min-width: 1800px) { .lm-x2 { display: flex; } }
+
+.lm-cell {
+  position: relative; isolation: isolate; flex: none; overflow: hidden; container-type: inline-size;
+  height: var(--th); margin-bottom: var(--gap); border-radius: var(--r); padding: calc(var(--col) * 0.08);
+  color: var(--t-ink);
+}
+.lm-cell::after { content: ''; position: absolute; inset: 0; z-index: -1; pointer-events: none; background-image: var(--lm-grain); opacity: 0.13; mix-blend-mode: multiply; }
+.lm-coral { background: var(--t-coral); }
+.lm-lime { background: var(--t-lime); }
+.lm-yellow { background: var(--t-yellow); }
+.lm-cream { background: var(--t-cream); box-shadow: inset 0 0 0 1px #e9e6df; }
+.lm-dark { background: var(--t-dark); color: #fbf5ea; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14); }
+.lm-dark::after { opacity: 0.035; mix-blend-mode: screen; }
+
+@keyframes lm-bar { 0%, 100% { transform: scaleY(0.3); } 50% { transform: scaleY(1); } }
+.lm-bar { transform-origin: center; animation: lm-bar 1.4s ease-in-out infinite; }
+
+/* Mobile and small tablets: mosaic sits below the copy and is centred. */
+@media (max-width: 1023px) {
+  .lm { --gap: 8px; --col: calc((100vw - 32px - 2 * var(--gap)) / 3); --r: 16px; }
+  .lm-grid { right: auto; left: 50%; transform: translateX(-50%); }
+  .lm-mosaic { -webkit-mask-image: linear-gradient(to bottom, transparent, #000 14%); mask-image: linear-gradient(to bottom, transparent, #000 14%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lm-col, .lm-bar { animation: none !important; }
+}

@@ -1,0 +1,181 @@
+# Production-shaped EXAMPLE for a single app host (staging uses the same file with the staging env
+# file and staging images). It is a template, not a turnkey deployment: see docs/deployment.md.
+#
+#   APP_ENV=production IMAGE_TAG=<git sha> docker compose -f docker-compose.prod.yml up -d
+#
+# What is deliberately NOT here:
+#   - Postgres. Production uses managed Postgres (Supabase) with PITR. No database container.
+#   - The runner fleet. Runners go on DEDICATED hosts with gVisor or Firecracker, never on this host
+#     (sandbox-security.md S4). The `runner-host` profile below is for those hosts only.
+#   - Secrets. The deploy step renders /run/ai-interview/<service>.env from the secret manager onto a
+#     tmpfs (mode 0600) just before `up`; nothing secret lives in this file, the repo, or an image.
+#
+# Fail closed: every required variable uses ${VAR:?}, so a missing value stops `compose up`.
+
+name: ai-interview-${APP_ENV:?set APP_ENV to staging or production}
+
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=64m
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: { max-size: "20m", max-file: "5" }
+
+x-api-image: &api-image ${REGISTRY:?set REGISTRY}/ai-interview-api:${IMAGE_TAG:?set IMAGE_TAG to the git sha}
+
+services:
+  caddy:
+    image: caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?set APP_DOMAIN, e.g. app.example.com}
+      API_DOMAIN: ${API_DOMAIN:?set API_DOMAIN, e.g. api.example.com}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL}
+      SUPABASE_HOST: ${SUPABASE_HOST:?set SUPABASE_HOST, e.g. <ref>.supabase.co (host only)}
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [edge]
+    # Caddy binds 80/443 and writes certificates to /data; it needs NET_BIND_SERVICE only.
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    restart: unless-stopped
+    depends_on:
+      api: { condition: service_healthy }
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 256m, pids: 128 }
+
+  # One-shot. Run explicitly by the deploy pipeline BEFORE rolling api/worker (docs/deployment.md
+  # "Migrations"). On Supabase the pipeline may use `supabase db push` instead; both read the same
+  # supabase/migrations files and must not be mixed on one database.
+  migrate:
+    image: *api-image
+    profiles: [migrate]
+    command: ["node", "--import", "tsx", "src/db/migrate-cli.ts"]
+    env_file: [/run/ai-interview/migrate.env] # DATABASE_URL with the migration (owner) role
+    networks: [egress]
+    restart: "no"
+    healthcheck: { disable: true }
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+
+  api:
+    image: *api-image
+    env_file: [/run/ai-interview/api.env]
+    environment:
+      NODE_ENV: production
+      WORKERS_ENABLED: "false"
+      HOST: 0.0.0.0
+      PORT: "4000"
+      # Exact origin only. No wildcard, no localhost.
+      CORS_ORIGINS: https://${APP_DOMAIN:?}
+      # The scheduler listener binds to all CONTAINER interfaces; exposure is controlled by the host
+      # publish below, which binds 4001 only on the private runner-facing address (WireGuard / VPC
+      # peering + firewall). Caddy never routes to 4001 and also 404s /internal/* on the public side.
+      INTERNAL_HOST: 0.0.0.0
+      INTERNAL_PORT: "4001"
+    # Public traffic arrives only through caddy (4000 is not published).
+    ports:
+      - "${SCHEDULER_BIND_ADDR:?set SCHEDULER_BIND_ADDR to the host's private runner-facing IP}:4001:4001"
+    networks: [edge, egress]
+    deploy:
+      replicas: 1 # scale horizontally behind the proxy/LB; the API is stateless except SSE fan-out (see docs)
+      resources:
+        limits: { cpus: "1.0", memory: 1g, pids: 512 }
+    <<: *hardening
+
+  worker:
+    image: *api-image
+    command: ["node", "--import", "tsx", "src/worker.ts"]
+    env_file: [/run/ai-interview/worker.env]
+    environment:
+      NODE_ENV: production
+    networks: [egress]
+    healthcheck: { disable: true } # TODO(app): worker has no liveness endpoint
+    stop_grace_period: 60s # let in-flight jobs finish; the queue retries anything unfinished
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 1g, pids: 512 }
+    <<: *hardening
+
+  # Optional: production web is expected on Vercel. Use this only when self-hosting the web app.
+  web:
+    image: ${REGISTRY:?}/ai-interview-web:${APP_ENV:?}-${IMAGE_TAG:?}
+    profiles: [self-hosted-web]
+    networks: [edge]
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 768m, pids: 256 }
+    <<: *hardening
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+      - /app/apps/web/.next/cache:rw,noexec,nosuid,nodev,size=256m,uid=1000,gid=1000
+
+  # ------------------------------------------------------------------------------------------------
+  # runner-host profile: deploy ONLY on a dedicated runner host (no app secrets, no DB route,
+  # egress firewalled to the scheduler address only). Never enable this profile on the app host.
+  #
+  # The Docker sandbox adapter is DEV-ONLY. Production sandboxes must be gVisor (runsc) or
+  # Firecracker microVMs created through the runner's Sandbox interface (sandbox-security.md S1).
+  # TODO(runner): the gVisor/Firecracker adapter does not exist yet; this service is the shape the
+  # host deployment takes once it does. The runner container itself also runs under runsc here as
+  # defense in depth for the harness (requires runsc registered as a Docker runtime on the host).
+  # ------------------------------------------------------------------------------------------------
+  runner:
+    image: ${REGISTRY:?}/ai-interview-runner:${IMAGE_TAG:?}
+    profiles: [runner-host]
+    runtime: runsc
+    environment:
+      NODE_ENV: production
+      SCHEDULER_URL: ${SCHEDULER_URL:-} # e.g. https://scheduler.internal:4001 (mTLS: TODO(runner))
+      RUNNER_ID: ${RUNNER_ID:-}
+      RUNNER_PRIVATE_KEY_FILE: /run/secrets/runner_key
+      RUNNER_CREDENTIAL_FILE: /run/secrets/runner_credential
+      SANDBOX_ADAPTER: gvisor # TODO(runner): or firecracker; never docker in production
+      RUNNER_CONCURRENCY: ${RUNNER_CONCURRENCY:-2}
+    secrets: [runner_key, runner_credential]
+    networks: [runner_egress]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    ulimits:
+      nofile: { soft: 1024, hard: 1024 }
+      core: 0
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "2.0", memory: 1g, pids: 256 }
+    # No volumes. No /var/run/docker.sock. Ever.
+
+secrets:
+  runner_key:
+    file: /run/ai-interview/runner_key.pem # rendered from the secret manager on the runner host
+  runner_credential:
+    file: /run/ai-interview/runner_credential
+
+networks:
+  edge: {}
+  egress: {} # outbound to managed Postgres, Supabase, the AI provider, error tracking
+  runner_egress: {} # host firewall (nftables) restricts this to the scheduler address only
+
+volumes:
+  caddy_data: {}
+  caddy_config: {}

@@ -1,0 +1,32 @@
+# Build context is the repo root for every image (apps/web needs packages/shared, apps/api needs
+# packages/* and supabase/migrations). Keep the context small and keep secrets out of it.
+
+**/node_modules
+**/.next
+**/dist
+**/build
+**/coverage
+**/*.tsbuildinfo
+**/.turbo
+**/.vercel
+**/.DS_Store
+**/npm-debug.log*
+
+# Never send env files or keys to the builder. *.example files are placeholders and are allowed.
+**/.env
+**/.env.*
+!**/.env*.example
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/secrets
+**/.supabase
+
+# Not needed inside images
+.git
+.github
+docs
+infra/backups
+**/*.md
+!packages/prompts/**/*.md

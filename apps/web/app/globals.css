@@ -1,0 +1,156 @@
+@import 'tailwindcss';
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Light theme. Same structure as dark so every component works in both. */
+:root {
+  --bg: #f4f1ea;
+  --bg-2: #ebe6da;
+  --surface: rgba(255, 253, 248, 0.8);
+  --surface-2: rgba(30, 22, 12, 0.05);
+  --border: rgba(30, 22, 12, 0.13);
+  --border-strong: rgba(30, 22, 12, 0.25);
+  --fg: #14110d;
+  --muted: #5e564a;
+  --accent: #e2411f;
+  --accent-2: #3c7a12;
+  --accent-fg: #ffffff;
+  --accent-soft: rgba(226, 65, 31, 0.1);
+  --warm: #b86e00;
+  --good: #1f7a3d;
+  --warn: #9a5b00;
+  --bad: #b3261e;
+  --glow-a: rgba(255, 106, 69, 0.24);
+  --glow-b: rgba(190, 235, 90, 0.26);
+  --shadow: 0 1px 2px rgba(40, 24, 8, 0.06), 0 12px 32px -12px rgba(40, 24, 8, 0.2);
+  --radius: 16px;
+}
+
+/* Dark theme is the primary look. */
+.dark {
+  --bg: #0b0907;
+  --bg-2: #14100c;
+  --surface: rgba(30, 24, 18, 0.6);
+  --surface-2: rgba(255, 244, 230, 0.06);
+  --border: rgba(255, 226, 190, 0.14);
+  --border-strong: rgba(255, 226, 190, 0.28);
+  --fg: #fbf5ea;
+  --muted: #b3a894;
+  --accent: #ff6a45;
+  --accent-2: #c9f26b;
+  --accent-fg: #170b05;
+  --accent-soft: rgba(255, 106, 69, 0.16);
+  --warm: #ffd35a;
+  --good: #7fe0a3;
+  --warn: #f0b358;
+  --bad: #ff8a80;
+  --glow-a: rgba(255, 106, 69, 0.3);
+  --glow-b: rgba(201, 242, 107, 0.16);
+  --shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 24px 48px -24px rgba(0, 0, 0, 0.75);
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-bg-2: var(--bg-2);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-2: var(--accent-2);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-soft: var(--accent-soft);
+  --color-warm: var(--warm);
+  --color-good: var(--good);
+  --color-warn: var(--warn);
+  --color-bad: var(--bad);
+  --font-sans: var(--font-geist), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-geist), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, 'SF Mono', Menlo, monospace;
+}
+
+html { background: var(--bg); color: var(--fg); scroll-behavior: smooth; }
+body {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  background:
+    radial-gradient(900px 520px at 12% -8%, var(--glow-a), transparent 60%),
+    radial-gradient(760px 480px at 100% 0%, var(--glow-b), transparent 60%),
+    var(--bg);
+  background-attachment: fixed;
+}
+h1, h2, h3 { font-family: var(--font-display); letter-spacing: -0.03em; font-weight: 600; }
+.display { font-weight: 650; letter-spacing: -0.045em; line-height: 1.02; }
+.eyebrow { font-size: 0.72rem; letter-spacing: 0.16em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
+.text-gradient {
+  background: linear-gradient(100deg, var(--accent) 0%, var(--accent-2) 60%, var(--warm) 120%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+
+:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 3px; border-radius: 6px; }
+::selection { background: var(--accent-soft); }
+
+/* Glass surfaces. backdrop-filter is a progressive enhancement over a translucent fill. */
+.glass {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  backdrop-filter: blur(18px) saturate(140%);
+}
+.glass-hover { transition: border-color .25s, transform .25s, background .25s; }
+.glass-hover:hover { border-color: var(--border-strong); transform: translateY(-2px); }
+
+/* 3D tilt + spotlight, driven by --rx/--ry/--mx/--my set from Card. Disabled for touch and reduced motion. */
+.tilt { position: relative; transform: perspective(900px) rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg)); transition: transform .25s ease-out, border-color .25s; will-change: transform; }
+.tilt::before { content: ''; position: absolute; inset: 0; border-radius: inherit; pointer-events: none; opacity: 0; transition: opacity .25s;
+  background: radial-gradient(420px circle at var(--mx, 50%) var(--my, 50%), color-mix(in srgb, var(--accent) 16%, transparent), transparent 60%); }
+.tilt:hover::before { opacity: 1; }
+.tilt:hover { border-color: var(--border-strong); }
+@media (hover: none), (prefers-reduced-motion: reduce) { .tilt { transform: none; } .tilt::before { display: none; } }
+
+/* Fine grid used behind hero and room backdrops. */
+.grid-lines {
+  background-image:
+    linear-gradient(var(--border) 1px, transparent 1px),
+    linear-gradient(90deg, var(--border) 1px, transparent 1px);
+  background-size: 56px 56px;
+  mask-image: radial-gradient(ellipse at 50% 30%, #000 20%, transparent 72%);
+  -webkit-mask-image: radial-gradient(ellipse at 50% 30%, #000 20%, transparent 72%);
+}
+.noise::after {
+  content: ''; position: absolute; inset: 0; pointer-events: none; opacity: .035; mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+@keyframes rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+@keyframes shimmer { 100% { transform: translateX(100%); } }
+@keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-10px); } }
+@keyframes drift { 0% { transform: translate3d(0,0,0) scale(1); } 50% { transform: translate3d(3%,-4%,0) scale(1.08); } 100% { transform: translate3d(0,0,0) scale(1); } }
+@keyframes wave { 0%, 100% { transform: scaleY(.35); } 50% { transform: scaleY(1); } }
+@keyframes sweep { from { stroke-dashoffset: var(--len); } to { stroke-dashoffset: 0; } }
+@keyframes ping-soft { 0% { transform: scale(.9); opacity: .55; } 100% { transform: scale(1.7); opacity: 0; } }
+
+.rise { animation: rise .6s cubic-bezier(.2,.7,.2,1) both; }
+.float { animation: float 7s ease-in-out infinite; }
+.drift { animation: drift 16s ease-in-out infinite; }
+.wave-bar { transform-origin: center; animation: wave 1.4s ease-in-out infinite; }
+.ping-soft { animation: ping-soft 2.4s ease-out infinite; }
+.skeleton { position: relative; overflow: hidden; background: var(--surface-2); border-radius: 10px; }
+.skeleton::after { content: ''; position: absolute; inset: 0; transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--fg) 9%, transparent), transparent);
+  animation: shimmer 1.4s infinite; }
+
+/* Scroll reveal with no JS: browsers that support view timelines animate, others just show the content. */
+@supports (animation-timeline: view()) {
+  .reveal { animation: rise linear both; animation-timeline: view(); animation-range: entry 0% entry 35%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+  .reveal { animation: none; }
+}

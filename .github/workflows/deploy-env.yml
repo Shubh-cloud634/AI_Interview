@@ -1,0 +1,115 @@
+# One environment's deploy. Called by deploy.yml. The `environment:` key is what enforces approval
+# (production has required reviewers) and scopes secrets/variables to that environment.
+#
+# Order: render + check env (fail closed) -> backup checkpoint -> migrate -> roll api/worker ->
+# smoke /health -> web. Every TODO(deploy) is a host-specific template to fill in.
+name: deploy-env
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+      image_tag:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: deploy ${{ inputs.environment }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment:
+      name: ${{ inputs.environment }}
+      url: https://${{ vars.APP_DOMAIN }}
+    permissions:
+      contents: read
+      id-token: write # OIDC federation to the cloud account / secret manager
+    env:
+      APP_ENV: ${{ inputs.environment }}
+      IMAGE_TAG: ${{ inputs.image_tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.18.1"
+
+      - name: Validate inputs
+        run: |
+          [[ "$APP_ENV" =~ ^(staging|production)$ ]] || { echo "bad environment"; exit 1; }
+          [[ "$IMAGE_TAG" =~ ^[0-9a-f]{40}$ ]] || { echo "image_tag must be a full git sha"; exit 1; }
+          # `runner` context is not available in job-level env, so set the render dir here.
+          echo "RENDER_DIR=$RUNNER_TEMP/ai-interview" >> "$GITHUB_ENV"
+
+      # TODO(deploy): authenticate with OIDC, e.g. aws-actions/configure-aws-credentials (pin by SHA)
+      # with role-to-assume: ${{ vars.DEPLOY_ROLE_ARN }}, or google-github-actions/auth with workload
+      # identity. No long-lived cloud keys in GitHub secrets.
+
+      - name: Render env files from the secret manager
+        run: |
+          umask 077
+          mkdir -p "$RENDER_DIR"
+          # TODO(deploy): replace with your secret manager, for example:
+          #   aws secretsmanager get-secret-value --secret-id "ai-interview/$APP_ENV/api" \
+          #     --query SecretString --output text > "$RENDER_DIR/api.env"
+          # and the same for worker.env and migrate.env. Never `cat` these files or echo values.
+          for svc in api worker migrate; do
+            test -s "$RENDER_DIR/$svc.env" || { echo "::error::$svc.env not rendered (TODO(deploy))"; exit 1; }
+          done
+
+      - name: Fail closed on env policy
+        run: |
+          node infra/scripts/check-env.mjs "$APP_ENV" "$RENDER_DIR/api.env" --service api
+          node infra/scripts/check-env.mjs "$APP_ENV" "$RENDER_DIR/worker.env" --service worker
+          node infra/scripts/check-env.mjs "$APP_ENV" "$RENDER_DIR/migrate.env" --service migrate
+
+      - name: Backup checkpoint before migrating
+        run: |
+          # PITR covers this, but record the restore point so a rollback has an exact target.
+          echo "restore_point=$(date -u +%Y-%m-%dT%H:%M:%SZ)" | tee -a "$GITHUB_STEP_SUMMARY"
+          # TODO(deploy): optionally trigger an on-demand provider snapshot here for production.
+
+      - name: Migrate (forward only)
+        run: |
+          # TODO(deploy): pick ONE path per database and keep it:
+          #   Supabase: supabase link --project-ref "${{ vars.SUPABASE_PROJECT_REF }}" && supabase db push
+          #             (supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359 # v3.0.1)
+          #   Plain Postgres: run the migrate image on the host:
+          #     docker compose -f docker-compose.prod.yml --profile migrate run --rm migrate
+          echo "::error::migration step not configured (TODO(deploy))"; exit 1
+
+      - name: Roll api and worker
+        run: |
+          # TODO(deploy): copy the rendered env files to /run/ai-interview on the host (tmpfs, 0600)
+          # over SSH with a host key pinned in vars.DEPLOY_KNOWN_HOSTS, then:
+          #   docker compose -f docker-compose.prod.yml pull api worker
+          #   docker compose -f docker-compose.prod.yml up -d --no-deps --wait api worker caddy
+          # Multi-host: drain one host at a time behind the load balancer.
+          echo "::error::rollout step not configured (TODO(deploy))"; exit 1
+
+      - name: Smoke test
+        run: |
+          for i in $(seq 1 30); do
+            curl -fsS --max-time 5 "https://${{ vars.API_DOMAIN }}/health" && exit 0
+            sleep 5
+          done
+          echo "::error::/health did not pass; roll back with deploy.yml (workflow_dispatch, previous sha)"
+          exit 1
+
+      - name: Web
+        run: |
+          # TODO(deploy): Vercel: `vercel deploy --prebuilt --prod` with VERCEL_TOKEN scoped to this
+          # environment, NEXT_PUBLIC_* set per environment in the Vercel project. Self-hosted: build
+          # apps/web/Dockerfile with this environment's NEXT_PUBLIC_* build args and roll `web`.
+          echo "web deploy not configured (TODO(deploy))"
+
+      - name: Shred rendered env files
+        if: always()
+        run: rm -rf "$RENDER_DIR"

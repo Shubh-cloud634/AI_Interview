@@ -1,0 +1,61 @@
+# Deploy: staging automatically after CI on main, production only after a human approves the
+# `production` environment (Settings -> Environments -> production -> Required reviewers; also
+# restrict it to the main branch). Also runnable by hand to redeploy or roll back to an earlier
+# image tag (every image is tagged with its git sha).
+#
+# The host-specific steps are TEMPLATES marked TODO(deploy). Nothing here has been run.
+name: deploy
+
+on:
+  workflow_call:
+    inputs:
+      image_tag:
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Git sha of an image already in GHCR (redeploy or roll back)
+        type: string
+        required: true
+      target:
+        description: Which environment
+        type: choice
+        options: [staging, production]
+        default: staging
+
+permissions:
+  contents: read
+
+concurrency:
+  # One deploy per environment at a time; never cancel a deploy midway.
+  group: deploy-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  staging:
+    if: github.event_name != 'workflow_dispatch' || inputs.target == 'staging'
+    uses: ./.github/workflows/deploy-env.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      environment: staging
+      image_tag: ${{ inputs.image_tag }}
+    secrets: inherit
+
+  production:
+    # From CI: only after staging succeeded. By hand: production directly (still gated by approval).
+    needs: [staging]
+    if: >-
+      always() &&
+      ((github.event_name != 'workflow_dispatch' && needs.staging.result == 'success') ||
+       (github.event_name == 'workflow_dispatch' && inputs.target == 'production'))
+    uses: ./.github/workflows/deploy-env.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      environment: production
+      image_tag: ${{ inputs.image_tag }}
+    secrets: inherit

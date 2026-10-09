@@ -1,0 +1,82 @@
+# Reverse proxy for docker-compose.prod.yml. Automatic HTTPS (ACME), HTTP->HTTPS redirect, HSTS,
+# security headers, SSE-safe proxying. Environment: APP_DOMAIN, API_DOMAIN, ACME_EMAIL, SUPABASE_HOST
+# (host only, e.g. <ref>.supabase.co; used for https:// and wss:// in connect-src).
+#
+# CSP rollout: ship the policy as Content-Security-Policy-Report-Only on staging first, exercise the
+# landing page, an interview with the Monaco coding pane and the MediaPipe visual check, then switch
+# the header name to Content-Security-Policy. Shared headers live in the (common_headers) snippet.
+
+{
+	email {$ACME_EMAIL}
+	# Admin API off: nothing on the host needs to reconfigure Caddy at run time.
+	admin off
+	# If a CDN/LB sits in front of Caddy, add: servers { trusted_proxies static <its ranges> }
+}
+
+(common_headers) {
+	header {
+		# Two years. Add "; preload" only after every subdomain serves HTTPS and you mean it.
+		Strict-Transport-Security "max-age=63072000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Cross-Origin-Opener-Policy "same-origin"
+		X-Frame-Options "DENY"
+		-Server
+		-X-Powered-By
+	}
+}
+
+# ---------------------------------------------------------------- web app (only if self-hosted)
+# If the web app runs on Vercel, apply the same headers there (infra/vercel/headers.example.json).
+{$APP_DOMAIN} {
+	import common_headers
+	header {
+		# Next.js (no nonce middleware yet, so inline bootstrap scripts need 'unsafe-inline'),
+		# self-hosted Monaco under /monaco/vs (injects inline styles, spawns workers), MediaPipe under
+		# /vision (WebAssembly needs 'wasm-unsafe-eval', never 'unsafe-eval'), SSE via fetch (connect-src),
+		# direct resume upload to a Supabase signed URL (connect-src SUPABASE_HOST).
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; worker-src 'self' blob:; child-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; connect-src 'self' https://{$API_DOMAIN} https://{$SUPABASE_HOST} wss://{$SUPABASE_HOST}; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; manifest-src 'self'; upgrade-insecure-requests"
+		# Camera for the opt-in visual check only, same origin. Nothing else.
+		Permissions-Policy "camera=(self), microphone=(), geolocation=(), payment=(), usb=()"
+	}
+	# Next's hashed assets are immutable. Monaco's loader.js and the MediaPipe files keep their names
+	# across upgrades, so they get a short cache instead.
+	@immutable path /_next/static/*
+	header @immutable Cache-Control "public, max-age=31536000, immutable"
+	@selfhosted path /monaco/* /vision/*
+	header @selfhosted Cache-Control "public, max-age=86400"
+	encode zstd gzip
+	reverse_proxy web:3000
+}
+
+# ---------------------------------------------------------------- API
+{$API_DOMAIN} {
+	import common_headers
+	header {
+		# JSON and SSE only: nothing on this origin should ever render or be framed.
+		Content-Security-Policy "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+		Cross-Origin-Resource-Policy "same-site"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+	}
+	# Belt and braces: the scheduler contract lives on a separate listener (port 4001) that Caddy never
+	# proxies, but refuse the path here too.
+	@internal path /internal/*
+	respond @internal 404
+
+	# SSE: no compression, no buffering. Caddy flushes text/event-stream immediately; flush_interval -1
+	# makes it explicit for the session events stream.
+	@sse path_regexp sse ^/v1/sessions/[^/]+/events$
+	reverse_proxy @sse api:4000 {
+		flush_interval -1
+	}
+
+	@notsse not path_regexp ^/v1/sessions/[^/]+/events$
+	encode @notsse zstd gzip
+	reverse_proxy api:4000 {
+		health_uri /health
+		health_interval 10s
+	}
+
+	# CORS is enforced by the API (@fastify/cors with the exact CORS_ORIGINS allowlist). Do not add
+	# Access-Control-* headers here: two layers disagreeing is how wildcard CORS ships by accident.
+}

@@ -1,0 +1,35 @@
+{
+  "name": "@ai-interview/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch --env-file=.env src/main.ts",
+    "start": "tsx --env-file=.env src/main.ts",
+    "worker": "tsx src/worker.ts",
+    "migrate": "tsx src/db/migrate-cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@ai-interview/prompts": "*",
+    "@ai-interview/shared": "*",
+    "@anthropic-ai/sdk": "^0.132.1",
+    "@fastify/cors": "^11.0.0",
+    "@fastify/rate-limit": "^10.0.0",
+    "fastify": "^5.12.5",
+    "jose": "^6.2.12",
+    "mammoth": "^1.9.0",
+    "pg": "^8.23.1",
+    "tsx": "^4.20.0",
+    "unpdf": "^1.0.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.15.0",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  }
+}

@@ -1,0 +1,219 @@
+# Local development stack: postgres, migrate (one-shot), api, worker, web, runner (opt-in profile).
+#
+#   cp .env.development.example .env.development   # fill the placeholders
+#   docker compose up --build                      # postgres + migrate + api + worker + web
+#   docker compose --profile runner up --build     # also the runner (see the warning below)
+#
+# DEVELOPMENT ONLY. Production topology is docker-compose.prod.yml plus docs/deployment.md.
+#
+# Networks (who can reach whom):
+#   edge     web, api, worker. Not internal, so api/worker reach the AI provider and Supabase.
+#   data     postgres, migrate, api, worker. internal: true: no egress and no host route.
+#   sandbox  api (scheduler listener only) and runner. internal: true. The runner is on this network
+#            ONLY: it has no route to postgres, the worker, the web app, or the internet.
+#
+# Supabase auth and storage are not in this file. Run `supabase start` (Supabase CLI) on the host and
+# point SUPABASE_URL at http://host.docker.internal:54321, or use a dedicated dev Supabase project.
+# Never point a dev stack at the staging or production project.
+
+name: ai-interview-dev
+
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=64m
+
+x-api-env: &api-env
+  NODE_ENV: development
+  LOG_LEVEL: ${LOG_LEVEL:-debug}
+  DATABASE_URL: postgres://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-dev-only-postgres}@postgres:5432/${POSTGRES_DB:-ai_interview}
+  CORS_ORIGINS: http://localhost:3000
+
+services:
+  postgres:
+    image: postgres:17.11-alpine3.24@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      # Dev-only, local-only password. Staging and production use a managed database.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev-only-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-ai_interview}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Supabase pieces the migrations rely on (auth schema, auth.uid(), anon/authenticated roles).
+      - ./apps/api/test/supabase-shim.sql:/docker-entrypoint-initdb.d/00-supabase-shim.sql:ro
+    # No published port: an internal network has no host route. Use
+    # `docker compose exec postgres psql -U app ai_interview` for a shell.
+    networks: [data]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 1g }
+
+  migrate:
+    build: { context: ., dockerfile: apps/api/Dockerfile }
+    image: ai-interview-api:dev
+    command: ["node", "--import", "tsx", "src/db/migrate-cli.ts"]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-dev-only-postgres}@postgres:5432/${POSTGRES_DB:-ai_interview}
+    networks: [data]
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: "no"
+    healthcheck: { disable: true }
+    <<: *hardening
+
+  api:
+    image: ai-interview-api:dev
+    env_file:
+      - path: .env.development
+        required: false
+    environment:
+      <<: *api-env
+      WORKERS_ENABLED: "false" # the worker service runs the queue
+      HOST: 0.0.0.0
+      PORT: "4000"
+      # The scheduler listener binds only to the api's address on the sandbox network, so the
+      # runner contract is not reachable from edge or data.
+      INTERNAL_HOST: 172.30.0.10
+      INTERNAL_PORT: "4001"
+    ports:
+      - "127.0.0.1:4000:4000"
+    networks:
+      edge: {}
+      data: {}
+      sandbox:
+        ipv4_address: 172.30.0.10
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 768m, pids: 256 }
+    <<: *hardening
+
+  worker:
+    image: ai-interview-api:dev
+    command: ["node", "--import", "tsx", "src/worker.ts"]
+    env_file:
+      - path: .env.development
+        required: false
+    environment:
+      <<: *api-env
+    networks: [edge, data]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    restart: unless-stopped
+    # No HTTP listener in src/worker.ts. TODO(app): worker liveness signal (heartbeat file or port).
+    healthcheck: { disable: true }
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 768m, pids: 256 }
+    <<: *hardening
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        # Inlined into the browser bundle at build time. Public values only.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000}
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL:-http://localhost:54321}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY:-replace-with-local-anon-key}
+    image: ai-interview-web:dev
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks: [edge]
+    depends_on:
+      api: { condition: service_healthy }
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 512m, pids: 256 }
+    <<: *hardening
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+      - /app/apps/web/.next/cache:rw,noexec,nosuid,nodev,size=128m,uid=1000,gid=1000
+
+  # ------------------------------------------------------------------------------------------------
+  # RUNNER (profile: runner). DEV ONLY.
+  #
+  # The Docker sandbox adapter shares the host kernel and is NOT production isolation. Production
+  # runs the runner on dedicated gVisor (runsc) or Firecracker hosts (docs/sandbox-security.md S1,
+  # S4; docs/deployment.md "Runner fleet").
+  #
+  # This container gets no docker.sock and no container-runtime credential (F1). It can therefore
+  # exercise the scheduler contract (lease, sign, push result) but cannot start sandboxes itself
+  # unless the runner provides an adapter that works inside these constraints.
+  # TODO(runner): confirm adapter names. To execute real code in dev, run the runner on the host as
+  # an unprivileged user against ROOTLESS Docker or Podman instead (docs/deployment.md).
+  #
+  # Register it first: infra/scripts/register-runner.sh dev-runner-1 (writes infra/dev/runner_key.pem,
+  # prints the RUNNER_ID and the SQL insert for sandbox_runners).
+  # ------------------------------------------------------------------------------------------------
+  runner:
+    profiles: [runner]
+    build: { context: ., dockerfile: apps/runner/Dockerfile }
+    image: ai-interview-runner:dev
+    environment:
+      # TODO(runner): variable names are the contract proposed in docs/deployment.md; reconcile with
+      # apps/runner's config once it exists.
+      NODE_ENV: development
+      SCHEDULER_URL: http://172.30.0.10:4001
+      # Empty unless exported. The runner must refuse to start without a valid id (fail closed).
+      # (`:?` would break `docker compose up` for the default profile: interpolation is file-wide.)
+      RUNNER_ID: ${RUNNER_ID:-}
+      RUNNER_PRIVATE_KEY_FILE: /run/secrets/runner_key
+      # Bearer credential; the database stores only its sha256 (sandbox_runners.credential_sha256).
+      RUNNER_CREDENTIAL_FILE: /run/secrets/runner_credential
+      SANDBOX_ADAPTER: ${SANDBOX_ADAPTER:-docker}
+      RUNNER_CONCURRENCY: "1"
+      RUNNER_POLL_INTERVAL_MS: "1000"
+    secrets:
+      - runner_key
+      - runner_credential
+    networks: [sandbox] # ONLY the sandbox network: no route to postgres or the internet
+    depends_on:
+      api: { condition: service_healthy }
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    ulimits:
+      nofile: { soft: 1024, hard: 1024 }
+      core: 0
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 512m, pids: 128 }
+    # Explicitly no volumes. Never add /var/run/docker.sock here.
+
+secrets:
+  runner_key:
+    file: ./infra/dev/runner_key.pem # gitignored; generated by infra/scripts/register-runner.sh
+  runner_credential:
+    file: ./infra/dev/runner_credential # gitignored; generated by infra/scripts/register-runner.sh
+
+networks:
+  edge: {}
+  data:
+    internal: true
+  sandbox:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+volumes:
+  pgdata: {}

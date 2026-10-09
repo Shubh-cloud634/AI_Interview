@@ -1,0 +1,273 @@
+# CI: install, typecheck, test, build, audit, secret scan, migration check, Docker build + Trivy.
+# On main it also publishes images and hands off to deploy.yml (staging, then production behind the
+# `production` environment's required reviewers).
+#
+# Actions are pinned to commit SHAs (resolved with `git ls-remote` on 2026-10-08); the trailing
+# comment is the tag. Container images are pinned by index digest (Docker Hub / GHCR, same day).
+# Update them with Dependabot/Renovate, never by hand-editing to a tag.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  NODE_VERSION: "24.18.1"
+  # npm audit fails the build at this severity or above (production dependencies only).
+  AUDIT_LEVEL: high
+
+jobs:
+  checks:
+    name: install, typecheck, test, build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            apps/web/package-lock.json
+
+      - name: Install (root workspaces)
+        run: npm ci --no-audit --no-fund
+      - name: Install (apps/web, own lockfile)
+        run: npm ci --prefix apps/web --no-audit --no-fund
+
+      - name: Typecheck
+        run: |
+          npm run typecheck
+          npm run typecheck --prefix apps/web
+      - name: Test
+        run: npm test
+
+      # sandbox-security.md S17: the API must never execute candidate code.
+      - name: Lint - API does not spawn processes or VMs
+        run: |
+          if grep -rnE "from ['\"](node:)?(child_process|vm|worker_threads)['\"]|require\(['\"](node:)?(child_process|vm|worker_threads)['\"]\)" apps/api/src; then
+            echo "::error::apps/api must not import child_process, vm or worker_threads (sandbox-security.md S17)"
+            exit 1
+          fi
+
+      - name: Build web
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+          NEXT_PUBLIC_API_URL: https://api.ci.invalid
+          NEXT_PUBLIC_SUPABASE_URL: https://ci.invalid
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-placeholder-anon-key
+        run: npm run build --prefix apps/web
+
+      - name: npm audit (production deps, fail at ${{ env.AUDIT_LEVEL }})
+        run: |
+          npm audit --omit=dev --audit-level="$AUDIT_LEVEL"
+          npm audit --prefix apps/web --omit=dev --audit-level="$AUDIT_LEVEL"
+
+      - name: Infra sanity (env templates fail closed, YAML parses)
+        run: |
+          node infra/scripts/check-env.mjs development .env.development.example
+          if node infra/scripts/check-env.mjs production .env.production.example; then
+            echo "::error::production template must FAIL the env check (placeholders)"; exit 1
+          fi
+          npm install --prefix "$RUNNER_TEMP/yamlcheck" --no-audit --no-fund yaml@2.9.1
+          YAML_LIB_DIR="$RUNNER_TEMP/yamlcheck" node infra/scripts/validate-yaml.mjs
+
+  secret-scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # The gitleaks CLI image (MIT) rather than gitleaks-action, which needs a licence for orgs.
+      - name: gitleaks (full history)
+        run: |
+          docker run --rm -v "$PWD:/repo:ro" ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
+            git /repo --redact --no-banner --exit-code 1
+
+  migrations:
+    name: migrations against ephemeral Postgres
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17.11-alpine3.24@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci-only
+          POSTGRES_DB: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ci" --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      DATABASE_URL: postgres://ci:ci-only@localhost:5432/ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+
+      - name: Applied migrations are immutable
+        if: github.event_name == 'pull_request'
+        run: |
+          base="origin/${{ github.base_ref }}"
+          changed=$(git diff --name-only --diff-filter=MDR "$base"...HEAD -- supabase/migrations || true)
+          if [ -n "$changed" ]; then
+            echo "::error::existing migrations were modified, renamed or deleted; add a new migration instead:"
+            echo "$changed"; exit 1
+          fi
+          for f in $(git diff --name-only --diff-filter=A "$base"...HEAD -- supabase/migrations); do
+            name=$(basename "$f")
+            echo "$name" | grep -Eq '^[0-9]{14}_[a-z0-9_]+\.sql$' || { echo "::error::bad migration name $name"; exit 1; }
+            last=$(git ls-tree --name-only "$base" supabase/migrations/ | xargs -n1 basename | sort | tail -n1)
+            [ "$name" \> "$last" ] || { echo "::error::$name sorts before $last (already on ${{ github.base_ref }})"; exit 1; }
+          done
+
+      - name: Supabase shim (auth schema, roles)
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f apps/api/test/supabase-shim.sql
+      - name: Apply all migrations
+        run: npm run migrate -w @ai-interview/api
+      - name: Re-run is a no-op
+        run: npm run migrate -w @ai-interview/api | tee /tmp/second.txt && grep -q "up to date" /tmp/second.txt
+      - name: Schema dump (artifact for review)
+        run: pg_dump --schema-only --no-owner "$DATABASE_URL" > schema.sql
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: schema
+          path: schema.sql
+          retention-days: 7
+
+  docker:
+    name: image ${{ matrix.app }}
+    needs: [checks, secret-scan, migrations]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write # push to GHCR on main only (the push step is gated below)
+      security-events: write # upload Trivy SARIF
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [api, web, runner]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Skip apps that do not exist yet
+        id: present
+        run: |
+          # TODO(runner): remove once apps/runner lands.
+          if [ -f "apps/${{ matrix.app }}/package.json" ]; then echo "ok=true" >> "$GITHUB_OUTPUT"; else echo "ok=false" >> "$GITHUB_OUTPUT"; echo "::warning::apps/${{ matrix.app }} not present; skipping"; fi
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        if: steps.present.outputs.ok == 'true'
+      - name: Image name
+        if: steps.present.outputs.ok == 'true'
+        id: meta
+        run: echo "ref=ghcr.io/${GITHUB_REPOSITORY,,}/ai-interview-${{ matrix.app }}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+      - name: Build (load for scanning)
+        if: steps.present.outputs.ok == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: apps/${{ matrix.app }}/Dockerfile
+          load: true
+          push: false
+          tags: ${{ steps.meta.outputs.ref }}
+          # Web is built with CI placeholders for scanning only. Per-environment web images (or the
+          # Vercel build) inject real NEXT_PUBLIC_* values; see docs/deployment.md.
+          build-args: |
+            NEXT_PUBLIC_API_URL=https://api.ci.invalid
+            NEXT_PUBLIC_SUPABASE_URL=https://ci.invalid
+            NEXT_PUBLIC_SUPABASE_ANON_KEY=ci-placeholder-anon-key
+          cache-from: type=gha,scope=${{ matrix.app }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.app }}
+          provenance: false
+      - name: Trivy (fail on fixable HIGH/CRITICAL)
+        if: steps.present.outputs.ok == 'true'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.meta.outputs.ref }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          vuln-type: os,library
+          scanners: vuln,secret,misconfig
+      - name: Smoke - api image answers /health and runs as non-root
+        if: steps.present.outputs.ok == 'true' && matrix.app == 'api'
+        run: |
+          ref='${{ steps.meta.outputs.ref }}'
+          test "$(docker run --rm --entrypoint id "$ref" -u)" != "0"
+          # Starts without a database: /health does not touch it. Config needs syntactically valid values.
+          docker run -d --name api-smoke --read-only --tmpfs /tmp --cap-drop ALL \
+            -e NODE_ENV=production -e DATABASE_URL=postgres://none@127.0.0.1:1/none \
+            -e SUPABASE_URL=https://ci.invalid -e ANTHROPIC_API_KEY=ci-placeholder \
+            -e WORKERS_ENABLED=false -p 4000:4000 "$ref"
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:4000/health && break; sleep 1; done
+          curl -fsS http://127.0.0.1:4000/health
+          docker logs api-smoke | tail -n 20; docker rm -f api-smoke
+      - name: Push to GHCR (main only)
+        if: steps.present.outputs.ok == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push '${{ steps.meta.outputs.ref }}'
+
+  sandbox-images:
+    name: sandbox language images (build + scan)
+    needs: [checks]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build each apps/runner/images/<lang> that has a Dockerfile
+        id: build
+        run: |
+          refs=""
+          for d in apps/runner/images/*/; do
+            [ -f "$d/Dockerfile" ] || { echo "::warning::$d has no Dockerfile yet (TODO(runner))"; continue; }
+            ref="ci/sandbox-$(basename "$d"):${GITHUB_SHA}"
+            docker build -t "$ref" "$d"
+            # The sandbox image must not default to root (sandbox-security.md S5).
+            test "$(docker run --rm --network none --entrypoint id "$ref" -u)" != "0"
+            refs="$refs $ref"
+          done
+          echo "refs=${refs# }" >> "$GITHUB_OUTPUT"
+      - name: Trivy each sandbox image
+        if: steps.build.outputs.refs != ''
+        run: |
+          for ref in ${{ steps.build.outputs.refs }}; do
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock:ro aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa \
+              image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$ref"
+          done
+
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [docker, sandbox-images]
+    permissions:
+      contents: read
+      id-token: write # OIDC to the cloud / secret manager; no long-lived deploy keys
+    uses: ./.github/workflows/deploy.yml
+    with:
+      image_tag: ${{ github.sha }}
+    secrets: inherit

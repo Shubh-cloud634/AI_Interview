@@ -1,0 +1,17 @@
+{
+  "name": "ai-interview",
+  "private": true,
+  "workspaces": [
+    "apps/api",
+    "apps/runner",
+    "packages/shared",
+    "packages/prompts"
+  ],
+  "scripts": {
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm test --workspaces --if-present"
+  },
+  "dependencies": {
+    "@supabase/server": "^1.9.1"
+  }
+}

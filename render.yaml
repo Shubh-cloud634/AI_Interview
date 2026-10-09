@@ -1,0 +1,22 @@
+# Render Blueprint for the API. Build context is the repo root (the API imports packages/*).
+# Secrets are marked sync:false: Render asks for them in the dashboard and they never live in git.
+services:
+  - type: web
+    name: rehearse-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./apps/api/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - { key: NODE_ENV, value: production }
+      - { key: PORT, value: "4000" }
+      - { key: TRUST_PROXY, value: "true" }
+      - { key: WORKERS_ENABLED, value: "true" }
+      - { key: AI_PROVIDER, value: gemini }
+      - { key: RESUME_BUCKET, value: resumes }
+      - { key: DATABASE_URL, sync: false }
+      - { key: SUPABASE_URL, sync: false }
+      - { key: SUPABASE_SERVICE_ROLE_KEY, sync: false }
+      - { key: GEMINI_API_KEY, sync: false }
+      - { key: CORS_ORIGINS, sync: false }   # the Vercel site URL, https, no trailing slash

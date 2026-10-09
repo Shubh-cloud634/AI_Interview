@@ -1,0 +1,89 @@
+# Metrics available TODAY without application changes, read from tables the API already writes.
+# Collector format for burningalchemist/sql_exporter. Run it with a read-only monitoring role that
+# has SELECT on jobs, run_jobs, run_results, ai_calls only (no PII columns are selected below).
+# Scrape interval 30-60 s; every query is an aggregate over an indexed or recent window.
+collector_name: ai_interview
+
+metrics:
+  - metric_name: aii_queue_jobs
+    type: gauge
+    help: Background jobs (parse_resume, evaluate_stage, finalize_evaluation, recommend) by status.
+    key_labels: [name, status]
+    values: [n]
+    query: |
+      select name, status, count(*)::float as n from jobs
+      where status in ('queued', 'active') or created_at > now() - interval '1 hour'
+      group by name, status
+
+  - metric_name: aii_queue_oldest_queued_seconds
+    type: gauge
+    help: Age of the oldest runnable queued job, by job name.
+    key_labels: [name]
+    values: [age]
+    query: |
+      select name, coalesce(extract(epoch from now() - min(run_after)), 0)::float as age
+      from jobs where status = 'queued' and run_after <= now() group by name
+
+  - metric_name: aii_run_jobs
+    type: gauge
+    help: Code execution jobs by status (queued backlog drives runner fleet scaling).
+    key_labels: [status, suite]
+    values: [n]
+    query: |
+      select status, suite, count(*)::float as n from run_jobs
+      where status in ('queued', 'leased') or created_at > now() - interval '1 hour'
+      group by status, suite
+
+  - metric_name: aii_run_job_latency_seconds_p95
+    type: gauge
+    help: p95 seconds from run_jobs.created_at to run_results.created_at over the last 15 minutes.
+    values: [p95]
+    query: |
+      select coalesce(percentile_cont(0.95) within group (order by extract(epoch from r.created_at - j.created_at)), 0)::float as p95
+      from run_results r join run_jobs j on j.id = r.job_id
+      where r.created_at > now() - interval '15 minutes'
+
+  - metric_name: aii_run_results_15m
+    type: gauge
+    help: Run outcomes in the last 15 minutes (timeout, memory_limit, output_limit, internal_error...).
+    key_labels: [status, runner_id]
+    values: [n]
+    query: |
+      select status, runner_id::text as runner_id, count(*)::float as n from run_results
+      where created_at > now() - interval '15 minutes' group by status, runner_id
+
+  - metric_name: aii_ai_calls_15m
+    type: gauge
+    help: AI provider calls in the last 15 minutes by task and outcome.
+    key_labels: [task, model, ok, error_kind]
+    values: [n]
+    query: |
+      select task, model, ok::text as ok, coalesce(error_kind, '') as error_kind, count(*)::float as n
+      from ai_calls where created_at > now() - interval '15 minutes'
+      group by task, model, ok, error_kind
+
+  - metric_name: aii_ai_cost_usd_24h
+    type: gauge
+    help: Sum of ai_calls.cost over the trailing 24 hours (USD, provider-reported costUsd summed in apps/api/src/ai/runner.ts).
+    key_labels: [model]
+    values: [cost]
+    query: |
+      select model, coalesce(sum(cost), 0)::float as cost from ai_calls
+      where created_at > now() - interval '24 hours' group by model
+
+  - metric_name: aii_ai_latency_ms_p95_15m
+    type: gauge
+    help: p95 AI call latency in ms, last 15 minutes, by task.
+    key_labels: [task]
+    values: [p95]
+    query: |
+      select task, percentile_cont(0.95) within group (order by latency_ms)::float as p95
+      from ai_calls where created_at > now() - interval '15 minutes' group by task
+
+  - metric_name: aii_ai_injection_flags_1h
+    type: gauge
+    help: AI calls with at least one prompt-injection pattern flagged, last hour.
+    values: [n]
+    query: |
+      select count(*)::float as n from ai_calls
+      where created_at > now() - interval '1 hour' and cardinality(injection_flags) > 0

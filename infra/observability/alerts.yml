@@ -1,0 +1,127 @@
+# Prometheus alerting rules. Metrics prefixed aii_ come from sql-exporter.collector.yml (available
+# now). probe_* come from blackbox_exporter against /health. Metrics marked TODO(app) or
+# TODO(runner) need instrumentation that does not exist yet; those rules stay inert until it does.
+# Severity: page = wake someone; ticket = next business day.
+groups:
+  - name: availability
+    rules:
+      - alert: ApiHealthDown
+        expr: probe_success{job="blackbox-health", target=~".*/health"} == 0
+        for: 2m
+        labels: { severity: page }
+        annotations:
+          summary: "API /health failing on {{ $labels.instance }}"
+      - alert: ApiHigh5xxRate
+        # TODO(app): http_requests_total{status} from a Fastify metrics plugin, or derive from proxy logs.
+        expr: sum(rate(http_requests_total{status=~"5.."}[5m])) / clamp_min(sum(rate(http_requests_total[5m])), 1) > 0.02
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: "API 5xx above 2% for 10m"
+
+  - name: queues
+    rules:
+      - alert: JobQueueBacklog
+        expr: max by (name) (aii_queue_oldest_queued_seconds) > 300
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: "{{ $labels.name }} jobs waiting > 5 min (workers down or saturated)"
+      - alert: JobFailuresRising
+        expr: sum by (name) (aii_queue_jobs{status="failed"}) > 10
+        for: 15m
+        labels: { severity: ticket }
+        annotations:
+          summary: "{{ $labels.name }}: more than 10 failed jobs in the last hour"
+      - alert: RunQueueBacklog
+        # The API returns 429 at 500 queued (MAX_QUEUE_DEPTH in modules/sandbox/sandbox.ts).
+        expr: sum(aii_run_jobs{status="queued"}) > 200
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "run_jobs backlog > 200: scale the runner fleet or check runner heartbeats"
+      - alert: RunLatencyHigh
+        expr: aii_run_job_latency_seconds_p95 > 30
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: "p95 run_job latency above 30 s"
+
+  - name: sandbox
+    rules:
+      - alert: SandboxTimeoutSpike
+        expr: sum(aii_run_results_15m{status="timeout"}) / clamp_min(sum(aii_run_results_15m), 1) > 0.3 and sum(aii_run_results_15m) > 20
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: "Over 30% of runs timing out (abuse, slow hosts, or a broken language image)"
+      - alert: SandboxOomSpike
+        expr: sum(aii_run_results_15m{status="memory_limit"}) > 25
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: "memory_limit outcomes spiking"
+      - alert: SandboxInternalErrors
+        expr: sum by (runner_id) (aii_run_results_15m{status="internal_error"}) > 5
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "Runner {{ $labels.runner_id }} reporting internal errors; consider revoking it"
+      - alert: RunnerPassRateAnomaly
+        # sandbox-security.md F3/S20: a forged-result runner shows an abnormal pass rate.
+        expr: |
+          (sum by (runner_id) (aii_run_results_15m{status="passed"}) / clamp_min(sum by (runner_id) (aii_run_results_15m), 1))
+          > 1.5 * (sum(aii_run_results_15m{status="passed"}) / clamp_min(sum(aii_run_results_15m), 1))
+          and sum by (runner_id) (aii_run_results_15m) > 30
+        for: 30m
+        labels: { severity: page }
+        annotations:
+          summary: "Runner {{ $labels.runner_id }} pass rate far above fleet: investigate, revoke key"
+      - alert: RunnerHeartbeatLost
+        # TODO(runner): runner_last_heartbeat_timestamp_seconds pushed by each runner.
+        expr: time() - max by (runner_id) (runner_last_heartbeat_timestamp_seconds) > 120
+        for: 2m
+        labels: { severity: page }
+        annotations:
+          summary: "Runner {{ $labels.runner_id }} has not polled for 2 min"
+      - alert: SandboxSeccompKills
+        # TODO(runner): sandbox_seccomp_kills_total.
+        expr: increase(sandbox_seccomp_kills_total[15m]) > 0
+        labels: { severity: ticket }
+        annotations:
+          summary: "Seccomp killed a sandbox (escape attempt or a too-tight profile)"
+
+  - name: ai
+    rules:
+      - alert: AiErrorRateHigh
+        expr: sum(aii_ai_calls_15m{ok="false"}) / clamp_min(sum(aii_ai_calls_15m), 1) > 0.1 and sum(aii_ai_calls_15m) > 20
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: "AI provider error rate above 10%"
+      - alert: AiLatencyHigh
+        expr: max(aii_ai_latency_ms_p95_15m{task=~"generateQuestion|followUp|analyzeAnswer"}) > 8000
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: "Interview AI p95 above 8 s (budget: first token < 2 s)"
+      - alert: AiSpendHigh
+        # Set the threshold per environment from the monthly budget / 30, with headroom.
+        expr: sum(aii_ai_cost_usd_24h) > 200
+        labels: { severity: page }
+        annotations:
+          summary: "AI spend over the trailing 24 h exceeds the daily budget"
+      - alert: PromptInjectionSurge
+        expr: aii_ai_injection_flags_1h > 50
+        labels: { severity: ticket }
+        annotations:
+          summary: "Many inputs matched prompt-injection patterns in the last hour"
+
+  - name: data
+    rules:
+      - alert: BackupMissing
+        # TODO(infra): db-backup.sh pushes backup_last_success_timestamp_seconds.
+        expr: time() - backup_last_success_timestamp_seconds > 26 * 3600
+        labels: { severity: page }
+        annotations:
+          summary: "No successful logical backup in 26 h"
