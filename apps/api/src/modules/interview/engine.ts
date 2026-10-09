@@ -336,7 +336,18 @@ export function createEngine(deps: { db: Db; interviewer: Interviewer; bus: Sess
       const mv = await getModeVersion(sql, s.mode_version_id);
       const after = run({ status: s.status, stageIdx: s.stage_idx }, ['end'], mv.spec.stages.length);
       await sql.query(`update sessions set status = $2, ended_at = now() where id = $1`, [sessionId, after.status]);
+      // Ending early keeps what was answered: a stage with at least one candidate answer is completed and scored,
+      // the rest are skipped. Without the finalize job below no report is ever produced and the results page waits forever.
+      const answered = await sql.query<{ id: string }>(
+        `update stage_runs sr set status = 'completed', ended_at = now()
+         where sr.session_id = $1 and sr.status = 'active'
+           and exists (select 1 from turns t where t.stage_run_id = sr.id and t.actor = 'candidate')
+         returning sr.id`,
+        [sessionId],
+      );
+      for (const sr of answered) await enqueue(sql, 'evaluate_stage', { stageRunId: sr.id }, { key: `evaluate_stage:${sr.id}` });
       await sql.query(`update stage_runs set status = 'skipped', ended_at = now() where session_id = $1 and status in ('pending', 'active')`, [sessionId]);
+      await enqueue(sql, 'finalize_evaluation', { sessionId }, { key: `finalize_evaluation:${sessionId}` });
       await track(sql, userId, 'session_abandoned', { sessionId });
       return sessionView(sql, await loadSession(sql, sessionId));
     });

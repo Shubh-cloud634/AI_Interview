@@ -22,8 +22,13 @@ export default function Results() {
         {(e) =>
           e === null || e.status === 'pending' ? (
             <Card className="flex items-center gap-3" role="status"><Loader2 className="animate-spin text-accent" aria-hidden /> Scoring your answers. This usually takes under a minute.</Card>
-          ) : e.status === 'failed' || e.overall === null ? (
+          ) : e.status === 'failed' ? (
             <Card role="alert">We could not score this session. Your answers are saved.</Card>
+          ) : e.overall === null ? (
+            <Card role="status" className="space-y-4">
+              <p>No answers were scored. Answer at least one question before ending and you will get a score and a report.</p>
+              <ButtonLink href="/interview/setup">Start another interview</ButtonLink>
+            </Card>
           ) : (
             <div className="space-y-6">
               <Card className="flex flex-wrap items-center gap-8">

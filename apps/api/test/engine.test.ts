@@ -97,6 +97,40 @@ describe('session lifecycle over HTTP', () => {
     expect(res.json.code).toBe('invalid_state');
   });
 
+  test('ending early after answering still produces a scored report', async () => {
+    const s = await startSession(t, u, mode('case-interview'));
+    await answer(t, u, s.id); // completes the "fit" stage
+    await answer(t, u, s.id); // answers once inside the "case" stage, which is still open
+    const ended = await t.call(u, { method: 'POST', url: `/v1/sessions/${s.id}/end` });
+    expect(ended.json.status).toBe('abandoned');
+    // Both stages with answers are scored; the untouched one is skipped.
+    expect(ended.json.stages.map((x: { status: string }) => x.status)).toEqual(['completed', 'completed', 'skipped']);
+    await t.drain();
+    const ev = await t.call(u, { method: 'GET', url: `/v1/sessions/${s.id}/evaluation` });
+    expect(ev.statusCode, ev.body).toBe(200);
+    expect(ev.json.status).toBe('ready');
+    expect(ev.json.overall).not.toBeNull();
+    const report = await t.call(u, { method: 'GET', url: `/v1/sessions/${s.id}/report` });
+    expect(report.statusCode, report.body).toBe(200);
+  });
+
+  test('ending with no answers resolves to a ready evaluation without a score', async () => {
+    const s = await startSession(t, u, mode('case-interview'));
+    await t.call(u, { method: 'POST', url: `/v1/sessions/${s.id}/end` });
+    await t.drain();
+    const ev = await t.call(u, { method: 'GET', url: `/v1/sessions/${s.id}/evaluation` });
+    expect(ev.statusCode, ev.body).toBe(200);
+    expect(ev.json.overall).toBeNull();
+  });
+
+  test.each(['technical-interview', 'hr-interview', 'behavioral-interview', 'coding-interview'])('%s starts and shows its first question', async (slug) => {
+    const s = await startSession(t, u, mode(slug));
+    expect(s.status).toBe('awaiting_answer');
+    expect(s.stages).toHaveLength(3);
+    const st = await getState(t, u, s.id);
+    expect(st.turns).toHaveLength(1);
+  });
+
   test('ending a completed session keeps it completed', async () => {
     const s = await startSession(t, u, mode('case-interview'));
     await runToCompletion(t, u, s.id);
