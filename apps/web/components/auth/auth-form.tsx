@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Field, Input } from '@/components/ui/field';
@@ -14,6 +14,18 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const register = mode === 'register';
+  // Show the Google button only when the Supabase project has Google switched on, so nobody hits
+  // "provider is not enabled". Hidden until the check says yes, and hidden if the check fails.
+  const [googleOn, setGoogleOn] = useState(false);
+  useEffect(() => {
+    if (!authConfigured()) return;
+    const ctl = new AbortController();
+    fetch(`${process.env.NEXT_PUBLIC_SUPABASE_URL}/auth/v1/settings`, { headers: { apikey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY! }, signal: ctl.signal })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j: { external?: { google?: boolean } } | null) => setGoogleOn(j?.external?.google === true))
+      .catch(() => setGoogleOn(false));
+    return () => ctl.abort();
+  }, []);
 
   async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -77,9 +89,11 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
         {busy && <Loader2 className="animate-spin" size={16} aria-hidden />}
         {register ? 'Create account' : 'Sign in'}
       </Button>
-      <Button type="button" variant="secondary" className="w-full" onClick={google}>
-        Continue with Google
-      </Button>
+      {googleOn && (
+        <Button type="button" variant="secondary" className="w-full" onClick={google}>
+          Continue with Google
+        </Button>
+      )}
       <p className="text-center text-sm text-muted">
         {register ? 'Already have an account? ' : 'New here? '}
         <Link className="text-accent underline-offset-4 hover:underline" href={register ? '/login' : '/register'}>
