@@ -46,6 +46,7 @@ export function createAnthropicProvider(apiKey: string): AiProvider {
           throw new ProviderError('bad_request', `provider rejected request (${err.status})`);
         }
         if (err instanceof Anthropic.APIUserAbortError) throw new ProviderError('timeout', 'provider call timed out');
+        if (err instanceof Anthropic.APIError && err.status === 429) throw new ProviderError('rate_limited', 'provider rate limit reached (429)');
         if (err instanceof Anthropic.APIError) throw new ProviderError('unavailable', `provider error ${err.status ?? 'network'}`);
         throw new ProviderError('unavailable', 'provider call failed');
       }

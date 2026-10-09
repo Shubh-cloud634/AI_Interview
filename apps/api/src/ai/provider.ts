@@ -44,10 +44,10 @@ export interface AiProvider {
   complete(call: ProviderCall): Promise<ProviderResult>;
 }
 
-/** Transient provider failure (network, 5xx, overload, timeout). Retryable. */
+/** Transient provider failure (network, 5xx, overload, timeout, rate limit). Retryable; a rate limit is worth retrying on another model. */
 export class ProviderError extends Error {
   constructor(
-    readonly kind: 'timeout' | 'unavailable' | 'refusal' | 'truncated' | 'bad_request',
+    readonly kind: 'timeout' | 'unavailable' | 'rate_limited' | 'refusal' | 'truncated' | 'bad_request',
     message: string,
   ) {
     super(message);

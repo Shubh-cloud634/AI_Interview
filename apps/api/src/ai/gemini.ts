@@ -42,10 +42,11 @@ export function createGeminiProvider({ apiKey, baseUrl = GEMINI_BASE_URL, fetch:
       if (signal.aborted) throw new ProviderError('timeout', 'provider call timed out');
       throw new ProviderError('unavailable', `provider unreachable (${err instanceof Error ? err.name : 'network'})`);
     }
-    // Rate limits (429) and brief overloads (503) are common on the free tier. Wait once, then let the task runner retry.
+    // Brief overloads (503) are common on the free tier: wait once, then let the task runner retry. A 429 is a quota
+    // limit, so waiting only helps when the provider says how long; otherwise fail fast and let the runner switch models.
     if ((res.status === 429 || res.status === 503) && !retried) {
-      const wait = Number(res.headers.get('retry-after')) * 1000 || 2500;
-      if (wait <= RATE_LIMIT_WAIT_MAX_MS) {
+      const wait = Number(res.headers.get('retry-after')) * 1000 || (res.status === 503 ? 2500 : 0);
+      if (wait > 0 && wait <= RATE_LIMIT_WAIT_MAX_MS) {
         await sleep(wait, signal);
         return post(body, signal, true);
       }
@@ -117,6 +118,7 @@ export function createGeminiProvider({ apiKey, baseUrl = GEMINI_BASE_URL, fetch:
       if (res.status === 401 || res.status === 403 || res.status === 400 || res.status === 404) {
         throw new ProviderError('bad_request', `provider rejected request (${res.status})`);
       }
+      if (res.status === 429) throw new ProviderError('rate_limited', 'provider rate limit or quota reached (429)');
       if (!res.ok) throw new ProviderError('unavailable', `provider error ${res.status}`);
 
       let text: string;

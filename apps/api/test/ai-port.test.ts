@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import type { AiProvider, ProviderCall } from '../src/ai/provider';
+import { ProviderError, type AiProvider, type ProviderCall } from '../src/ai/provider';
 import { buildApp } from '../src/app';
 import { productionDeps } from '../src/deps';
 import { MemoryStore } from './helpers/store';
@@ -37,6 +37,37 @@ describe('AI provider port', () => {
     expect(models.map((m) => m.model)).toEqual(['custom-model-1']);
     const [se] = await db.query<{ model: string }>('select model from stage_evaluations where stage_run_id = $1', [sr!.id]);
     expect(se!.model).toBe('custom-model-1+custom-model-1');
+    await app.close();
+    await db.close();
+  });
+
+  test('a rate-limited main model falls back to the review model, and is skipped afterwards', async () => {
+    const inner = new TestAi();
+    const calls: string[] = [];
+    const limited: AiProvider = {
+      name: 'limited',
+      complete: async (call) => {
+        calls.push(call.model);
+        if (call.model === 'main-model') throw new ProviderError('rate_limited', 'quota');
+        return { ...(await inner.complete(call)), model: call.model };
+      },
+    };
+    const db = await createTestDb();
+    const config = testConfig({ AI_MODEL: 'main-model', AI_REVIEW_MODEL: 'review-model' });
+    const { app } = await buildApp({ config, db, provider: limited, store: new MemoryStore(), logger: false });
+    const [mode] = await db.query<{ id: string }>(`select id from modes where slug = 'hr-interview' limit 1`, []);
+    const headers = { authorization: `Bearer ${await mintToken()}` };
+
+    const first = await app.inject({ method: 'POST', url: '/v1/sessions', headers, payload: { modeId: mode!.id } });
+    expect(first.statusCode, first.body).toBe(201);
+    // One failed try on the main model, then the review model answered.
+    expect(calls).toEqual(['main-model', 'review-model']);
+
+    calls.length = 0;
+    const second = await app.inject({ method: 'POST', url: '/v1/sessions', headers, payload: { modeId: mode!.id } });
+    expect(second.statusCode, second.body).toBe(201);
+    // The limited model is in its cooldown, so it is not called again.
+    expect(calls).toEqual(['review-model']);
     await app.close();
     await db.close();
   });

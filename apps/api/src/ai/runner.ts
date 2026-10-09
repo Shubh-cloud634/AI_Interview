@@ -85,6 +85,18 @@ export function createTaskRunner(deps: { provider: AiProvider; db: Db; prompts: 
   const { provider, db, prompts, config, log } = deps;
   const models: Record<ModelTier, string> = { primary: config.AI_MODEL, review: config.AI_REVIEW_MODEL };
 
+  // A model that just returned a rate limit or overload is skipped for a while, and calls go to the other tier's
+  // model instead. Without this every request burns its retries on the same exhausted model and users see "AI unavailable".
+  const RATE_LIMIT_COOLDOWN_MS = 60_000;
+  const OVERLOAD_COOLDOWN_MS = 10_000;
+  const coolingUntil = new Map<string, number>();
+  const isCooling = (m: string) => (coolingUntil.get(m) ?? 0) > Date.now();
+  const pickModel = (tier: ModelTier): string => {
+    const first = models[tier];
+    const other = models[tier === 'primary' ? 'review' : 'primary'];
+    return isCooling(first) && other !== first && !isCooling(other) ? other : first;
+  };
+
   async function overBudget(userId: string): Promise<boolean> {
     const [row] = await db.query<{ used: number }>(
       `select coalesce(sum(tokens_in + tokens_out), 0)::int as used from ai_calls
@@ -108,14 +120,13 @@ export function createTaskRunner(deps: { provider: AiProvider; db: Db; prompts: 
     if (injectionFlags.length) log.warn({ task: def.task, injectionFlags }, 'possible prompt injection in candidate data (treated as data)');
     const blocks = Object.entries(data).map(([name, text]) => dataBlock(name, text, boundary, def.maxDataChars));
     const basePrompt = `${blocks.join('\n\n')}\n\nComplete the task described in the system instructions using the data above.`;
-    const model = models[def.tier];
     const jsonSchema = schema ? toProviderSchema(schema) : null;
 
     const started = Date.now();
     let tokensIn = 0;
     let tokensOut = 0;
     let cost = 0;
-    let usedModel = model;
+    let usedModel: string = models[def.tier];
     let attempts = 0;
     let lastReason = '';
     let errorKind: string | null = null;
@@ -124,6 +135,7 @@ export function createTaskRunner(deps: { provider: AiProvider; db: Db; prompts: 
     for (; attempts <= config.AI_MAX_RETRIES && output === undefined; ) {
       attempts++;
       const prompt = lastReason ? `${basePrompt}\n\nYour previous output was rejected: ${lastReason}. Produce a corrected output.` : basePrompt;
+      const model = pickModel(def.tier);
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), def.timeoutMs ?? config.AI_TIMEOUT_MS);
       try {
@@ -166,6 +178,10 @@ export function createTaskRunner(deps: { provider: AiProvider; db: Db; prompts: 
         errorKind = kind;
         lastReason = '';
         if (kind === 'refusal' || kind === 'bad_request') break;
+        if (kind === 'rate_limited' || kind === 'unavailable') {
+          coolingUntil.set(model, Date.now() + (kind === 'rate_limited' ? RATE_LIMIT_COOLDOWN_MS : OVERLOAD_COOLDOWN_MS));
+          log.warn({ task: def.task, model, kind, next: pickModel(def.tier) }, 'AI model unavailable, trying the other model');
+        }
       } finally {
         clearTimeout(timer);
       }
