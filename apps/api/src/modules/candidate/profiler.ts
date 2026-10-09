@@ -33,8 +33,10 @@ const extractProfileTask: TaskDef<{ resumeText: string }, ProfileDraft> = {
   role: 'candidate',
   task: 'extractProfile',
   promptRef: () => 'candidate/extract-profile.v1',
-  tier: 'primary',
+  // Mechanical copy-out of what the resume says, and groundProfile drops anything unsupported, so the faster model tier is enough.
+  tier: 'review',
   effort: 'low',
+  timeoutMs: 25_000,
   maxTokens: 8000,
   vars: () => ({}),
   data: (i) => ({ resume: i.resumeText }),

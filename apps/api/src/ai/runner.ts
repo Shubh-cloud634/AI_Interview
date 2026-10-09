@@ -24,6 +24,8 @@ export interface TaskDef<I, O> {
   /** Untrusted text, each framed as its own data block. */
   data: (input: I) => Record<string, string>;
   maxDataChars: number;
+  /** Per-attempt timeout. Defaults to AI_TIMEOUT_MS; set lower for tasks that normally finish fast so a stalled call retries sooner. */
+  timeoutMs?: number;
   /** 'text' tasks stream and must produce a string; JSON tasks use structured output. */
   output: 'text' | ((input: I) => z.ZodType<O>);
   /** Semantic checks zod cannot express. Return a rejection reason, or null to accept. */
@@ -123,7 +125,7 @@ export function createTaskRunner(deps: { provider: AiProvider; db: Db; prompts: 
       attempts++;
       const prompt = lastReason ? `${basePrompt}\n\nYour previous output was rejected: ${lastReason}. Produce a corrected output.` : basePrompt;
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), config.AI_TIMEOUT_MS);
+      const timer = setTimeout(() => controller.abort(), def.timeoutMs ?? config.AI_TIMEOUT_MS);
       try {
         const res = await provider.complete({
           task: def.task, model, effort: def.effort, system, prompt, jsonSchema,

@@ -57,7 +57,7 @@ export const useResume = (id?: string | null) =>
     queryKey: ['resume', id],
     enabled: !!id,
     queryFn: () => api(`/resumes/${id}`, Resume),
-    refetchInterval: (q) => (q.state.data && ['uploaded', 'parsing'].includes(q.state.data.status) ? 2000 : false),
+    refetchInterval: (q) => (q.state.data && ['uploaded', 'parsing'].includes(q.state.data.status) ? 1000 : false),
   });
 
 export const useRecommendations = () => useQuery({ queryKey: ['recommendations'], queryFn: () => api('/recommendations', Recommendations) });
